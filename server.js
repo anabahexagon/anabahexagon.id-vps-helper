@@ -178,4 +178,65 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => ssh.end());
 });
 
+// --- AGENT REGISTRY ---
+const connectedAgents = new Map(); // vps_server_id -> socket
+
+// --- ADMIN NAMESPACE ---
+const adminIo = io.of('/admin');
+adminIo.on('connection', (socket) => {
+  // Send initial status of all connected agents
+  const statuses = {};
+  connectedAgents.forEach((_, id) => { statuses[id] = 'online'; });
+  socket.emit('initial-agent-statuses', statuses);
+});
+
+const agentIo = io.of('/agent');
+agentIo.use((socket, next) => {
+  const { token, serverId } = socket.handshake.auth;
+  if (!token || !serverId) return next(new Error('Authentication failed: Missing token or serverId'));
+  socket.serverId = serverId.toString();
+  next();
+});
+
+agentIo.on('connection', (socket) => {
+  const serverId = socket.serverId;
+  console.log(`Agent connected for Server ID: ${serverId}`);
+  connectedAgents.set(serverId, socket);
+  
+  // Notify admins
+  adminIo.emit('agent-status-update', { serverId, status: 'online' });
+
+  socket.on('disconnect', () => {
+    console.log(`Agent disconnected for Server ID: ${serverId}`);
+    if (connectedAgents.get(serverId) === socket) {
+      connectedAgents.delete(serverId);
+      // Notify admins
+      adminIo.emit('agent-status-update', { serverId, status: 'offline' });
+    }
+  });
+
+  socket.on('deploy-log', (data) => {
+    // Broadcast logs to any monitoring admin if needed
+    io.emit(`deploy-log-${serverId}`, data);
+  });
+});
+
+// --- DEPLOYMENT API ---
+app.post('/api/agent/deploy', requireAuth, (req, res) => {
+  const { serverId, deployPath, buildScript, branch } = req.body;
+  const agentSocket = connectedAgents.get(serverId.toString());
+
+  if (!agentSocket) {
+    return res.status(404).json({ success: false, error: 'Agent not connected for this server' });
+  }
+
+  agentSocket.emit('deploy-task', { deployPath, buildScript, branch }, (response) => {
+    if (response?.success) {
+      res.json({ success: true, message: 'Deployment task dispatched' });
+    } else {
+      res.status(500).json({ success: false, error: response?.error || 'Failed to dispatch task' });
+    }
+  });
+});
+
 server.listen(PORT, () => console.log(`VPS Helper running on port ${PORT}`));
