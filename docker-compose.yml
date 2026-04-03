@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  vps-helper:
+    build: .
+    container_name: anabahexagon-vps-helper
+    restart: always
+    ports:
+      - "3005:3005"
+    environment:
+      - PORT=3005
+      - SECRET_KEY=your-secure-secret-key
+      - DEFAULT_KEY_NAME=anaba-hexagon-key
+    # Alternatively, use an env_file:
+    # env_file:
+    #   - .env
