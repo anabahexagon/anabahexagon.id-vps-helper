@@ -14,7 +14,7 @@ RUN npm ci --omit=dev
 COPY server.js ./
 
 # Expose the port the app runs on
-EXPOSE 3005
+EXPOSE ${PORT}
 
 # Start the application
 CMD ["node", "server.js"]
