@@ -5,6 +5,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const { Client } = require('ssh2');
 const { generateKeyPairSync, createPrivateKey, createPublicKey } = require('crypto');
+const Database = require('better-sqlite3');
 
 const app = express();
 app.use(cors());
@@ -13,6 +14,25 @@ app.use(express.json());
 const PORT = process.env.PORT || 3005;
 const SECRET_KEY = process.env.SECRET_KEY || 'your-secure-secret-key';
 const DEFAULT_KEY_NAME = process.env.DEFAULT_KEY_NAME || 'anaba-hexagon-key';
+const METRICS_RETENTION_DAYS = parseInt(process.env.METRICS_RETENTION_DAYS || '7');
+
+// --- DATABASE INITIALIZATION ---
+const db = new Database('vps_helper.db');
+db.exec(`
+  CREATE TABLE IF NOT EXISTS metrics_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    serverId TEXT NOT NULL,
+    cpu REAL,
+    ram_percent REAL,
+    ram_used REAL,
+    ram_total REAL,
+    disk_percent REAL,
+    disk_used REAL,
+    disk_total REAL,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS idx_metrics_serverId_timestamp ON metrics_history(serverId, timestamp);
+`);
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -88,7 +108,6 @@ function toOpenSSHPrivateKey(pk) {
     kboundLen, kbound
   ]);
 
-  // Actually, cipherName and kdfName need their lengths explicitly
   const cName = Buffer.from("none"); const cNameL = Buffer.alloc(4); cNameL.writeUInt32BE(cName.length);
   const kName = Buffer.from("none"); const kNameL = Buffer.alloc(4); kNameL.writeUInt32BE(kName.length);
   const finalHeader = Buffer.concat([
@@ -168,7 +187,6 @@ const connectedAgents = new Map(); // vps_server_id -> socket
 // --- ADMIN NAMESPACE ---
 const adminIo = io.of('/admin');
 adminIo.on('connection', (socket) => {
-  // Send initial status of all connected agents
   const statuses = {};
   connectedAgents.forEach((_, id) => { statuses[id] = 'online'; });
   socket.emit('initial-agent-statuses', statuses);
@@ -188,7 +206,6 @@ agentIo.on('connection', (socket) => {
   console.log(`Agent connected for Server ID: ${serverId}`);
   connectedAgents.set(serverId, socket);
   
-  // Notify admins
   adminIo.emit('agent-status-update', { serverId, status: 'online' });
 
   socket.on('disconnect', () => {
@@ -203,6 +220,32 @@ agentIo.on('connection', (socket) => {
     adminIo.emit(`deploy-log-${serverId}`, data);
   });
 
+  socket.on('agent-metrics', (data) => {
+    // 1. Broadcast to admin
+    adminIo.emit(`agent-metrics-${serverId}`, data);
+
+    // 2. Save to SQLite
+    try {
+      const stmt = db.prepare(`
+        INSERT INTO metrics_history 
+        (serverId, cpu, ram_percent, ram_used, ram_total, disk_percent, disk_used, disk_total)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      stmt.run(
+        serverId, 
+        data.cpu, 
+        data.ram.percent, 
+        data.ram.used, 
+        data.ram.total, 
+        data.disk?.percent || null, 
+        data.disk?.used || null, 
+        data.disk?.total || null
+      );
+    } catch (err) {
+      console.error("Failed to save metrics to DB:", err.message);
+    }
+  });
+
   socket.on('deploy-result', (data) => {
     const { deploymentId, status, logs } = data;
     if (deploymentId) {
@@ -211,16 +254,56 @@ agentIo.on('connection', (socket) => {
   });
 });
 
+// --- METRICS API ---
+app.get('/api/agent/:serverId/metrics-history', requireAuth, (req, res) => {
+  const { serverId } = req.params;
+  const { range = '1h', since, until } = req.query;
+  
+  try {
+    let query = `SELECT * FROM metrics_history WHERE serverId = ?`;
+    const params = [serverId];
+
+    if (since && until) {
+      // Custom Range
+      query += ` AND timestamp BETWEEN ? AND ?`;
+      params.push(since, until);
+    } else {
+      // Predefined Ranges
+      const rangeMap = {
+        '1h': "-1 hour",
+        '3h': "-3 hours",
+        '6h': "-6 hours",
+        '12h': "-12 hours",
+        '24h': "-24 hours",
+        '1d': "-1 day",
+        '7d': "-7 days"
+      };
+      const sqlRange = rangeMap[range] || "-1 hour";
+      query += ` AND timestamp >= datetime('now', ?)`;
+      params.push(sqlRange);
+    }
+
+    // Downsampling logic: If range > 6h, take average per minute or more to keep chart light
+    // For now, let's just use LIMIT to keep it simple but functional
+    query += ` ORDER BY timestamp DESC LIMIT 200`;
+    
+    const rows = db.prepare(query).all(...params);
+    res.json({ success: true, result: rows.reverse() });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // --- DEPLOYMENT API ---
 app.post('/api/agent/deploy', requireAuth, (req, res) => {
-  const { serverId, deployPath, buildScript, branch, deploymentId } = req.body;
+  const { serverId, deployPath, buildScript, branch, deploymentId, repoUrl } = req.body;
   const agentSocket = connectedAgents.get(serverId.toString());
 
   if (!agentSocket) {
     return res.status(404).json({ success: false, error: 'Agent not connected for this server' });
   }
 
-  agentSocket.emit('deploy-task', { deployPath, buildScript, branch, deploymentId }, (response) => {
+  agentSocket.emit('deploy-task', { deployPath, buildScript, branch, deploymentId, repoUrl }, (response) => {
     if (response?.success) {
       res.json({ success: true, message: 'Deployment task dispatched' });
     } else {
@@ -245,5 +328,17 @@ async function reportDeploymentStatus(deploymentId, status, logs) {
     console.error(`Failed to report deployment ${deploymentId} status:`, err.message);
   }
 }
+
+// --- AUTO CLEANUP TASK ---
+setInterval(() => {
+  console.log(`Running metrics cleanup (Retention: ${METRICS_RETENTION_DAYS} days)...`);
+  try {
+    const stmt = db.prepare("DELETE FROM metrics_history WHERE timestamp < datetime('now', ?)");
+    const result = stmt.run(`-${METRICS_RETENTION_DAYS} days`);
+    console.log(`Cleaned up ${result.changes} old metric records.`);
+  } catch (err) {
+    console.error("Cleanup failed:", err.message);
+  }
+}, 3600000); // Run every hour
 
 server.listen(PORT, () => console.log(`VPS Helper running on port ${PORT}`));
