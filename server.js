@@ -46,9 +46,33 @@ const requireAuth = (req, res, next) => {
 };
 
 function getOpenSSHFormat(publicKey, keyName) {
-  const exported = publicKey.export({ type: 'pkcs1', format: 'der' });
-  const b64 = exported.toString('base64');
-  return `ssh-rsa ${b64} ${keyName}`;
+  try {
+    if (publicKey.asymmetricKeyType === 'ed25519') {
+      // Manually construct Ed25519 SSH wire format
+      const spkiBuffer = publicKey.export({ type: 'spki', format: 'der' });
+      // Ed25519 SPKI ends with the 32-byte public key
+      const pubBytes = spkiBuffer.subarray(spkiBuffer.length - 32);
+      
+      const name = Buffer.from("ssh-ed25519");
+      const nameLen = Buffer.alloc(4); nameLen.writeUInt32BE(name.length);
+      const keyLen = Buffer.alloc(4); keyLen.writeUInt32BE(pubBytes.length);
+      
+      const blob = Buffer.concat([nameLen, name, keyLen, pubBytes]);
+      return `ssh-ed25519 ${blob.toString('base64')} ${keyName}`;
+    }
+
+    // Default to SPKI for other types, PKCS1 for RSA
+    const type = publicKey.asymmetricKeyType === 'rsa' ? 'pkcs1' : 'spki';
+    const exported = publicKey.export({ type, format: 'der' });
+    const b64 = exported.toString('base64');
+    const prefix = publicKey.asymmetricKeyType === 'rsa' ? 'ssh-rsa' : `ssh-${publicKey.asymmetricKeyType}`;
+    return `${prefix} ${b64} ${keyName}`;
+  } catch (error) {
+    console.error("Error formatting public key:", error.message);
+    // Fallback to basic SPKI export
+    const exported = publicKey.export({ type: 'spki', format: 'der' });
+    return `ssh-key ${exported.toString('base64')} ${keyName}`;
+  }
 }
 
 // This builds the "authfile" format used by OpenSSH (-----BEGIN OPENSSH PRIVATE KEY-----)
