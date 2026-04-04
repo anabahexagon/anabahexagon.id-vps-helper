@@ -248,12 +248,13 @@ agentIo.on('connection', (socket) => {
     // 1. Broadcast to admin
     adminIo.emit(`agent-metrics-${serverId}`, data);
 
-    // 2. Save to SQLite
+    // 2. Save to SQLite with explicit ISO timestamp (UTC)
     try {
+      const timestamp = new Date().toISOString();
       const stmt = db.prepare(`
         INSERT INTO metrics_history 
-        (serverId, cpu, ram_percent, ram_used, ram_total, disk_percent, disk_used, disk_total)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (serverId, cpu, ram_percent, ram_used, ram_total, disk_percent, disk_used, disk_total, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       stmt.run(
         serverId, 
@@ -263,7 +264,8 @@ agentIo.on('connection', (socket) => {
         data.ram.total, 
         data.disk?.percent || null, 
         data.disk?.used || null, 
-        data.disk?.total || null
+        data.disk?.total || null,
+        timestamp
       );
     } catch (err) {
       console.error("Failed to save metrics to DB:", err.message);
