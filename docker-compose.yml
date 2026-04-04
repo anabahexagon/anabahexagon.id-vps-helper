@@ -10,6 +10,10 @@ services:
       - PORT=${PORT:-3005}
       - SECRET_KEY=${SECRET_KEY:-your-secure-secret-key}
       - DEFAULT_KEY_NAME=${DEFAULT_KEY_NAME:-anaba-hexagon-key}
+      - METRICS_RETENTION_DAYS=${METRICS_RETENTION_DAYS:-7}
+      - API_URL=${API_URL:-http://localhost:8787}
+    volumes:
+      - ./vps_helper.db:/app/vps_helper.db
     # Alternatively, use an env_file:
     # env_file:
     #   - .env
