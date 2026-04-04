@@ -6,6 +6,8 @@ const { Server } = require('socket.io');
 const { Client } = require('ssh2');
 const { generateKeyPairSync, createPrivateKey, createPublicKey } = require('crypto');
 const Database = require('better-sqlite3');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 app.use(cors());
@@ -17,7 +19,12 @@ const DEFAULT_KEY_NAME = process.env.DEFAULT_KEY_NAME || 'anaba-hexagon-key';
 const METRICS_RETENTION_DAYS = parseInt(process.env.METRICS_RETENTION_DAYS || '7');
 
 // --- DATABASE INITIALIZATION ---
-const db = new Database('vps_helper.db');
+const dataDir = path.join(__dirname, 'data');
+if (!fs.existsSync(dataDir)) {
+  fs.mkdirSync(dataDir, { recursive: true });
+}
+
+const db = new Database(path.join(dataDir, 'vps_helper.db'));
 db.exec(`
   CREATE TABLE IF NOT EXISTS metrics_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

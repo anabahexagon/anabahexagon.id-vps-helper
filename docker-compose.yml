@@ -13,7 +13,7 @@ services:
       - METRICS_RETENTION_DAYS=${METRICS_RETENTION_DAYS:-7}
       - API_URL=${API_URL:-http://localhost:8787}
     volumes:
-      - ./vps_helper.db:/app/vps_helper.db
+      - ./data:/app/data
     # Alternatively, use an env_file:
     # env_file:
     #   - .env
