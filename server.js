@@ -4,14 +4,9 @@ const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
 const { Client } = require('ssh2');
-const { generateKeyPairSync, createPrivateKey, createPublicKey } = require('node:crypto');
+const { generateKeyPairSync, createPrivateKey, createPublicKey } = require('crypto');
 
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"], credentials: true }
-});
-
 app.use(cors());
 app.use(express.json());
 
@@ -19,34 +14,23 @@ const PORT = process.env.PORT || 3005;
 const SECRET_KEY = process.env.SECRET_KEY || 'your-secure-secret-key';
 const DEFAULT_KEY_NAME = process.env.DEFAULT_KEY_NAME || 'anaba-hexagon-key';
 
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: "*", methods: ["GET", "POST"] }
+});
+
 const requireAuth = (req, res, next) => {
-  const userAgent = req.headers['user-agent'];
-  const secretKey = req.headers['x-anaba-secret-key'];
-  if (userAgent !== 'Anaba-Admin-App') return res.status(403).json({ success: false, error: 'Forbidden' });
-  if (secretKey !== SECRET_KEY) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  const key = req.headers['x-anaba-secret-key'];
+  if (key !== SECRET_KEY) return res.status(401).json({ success: false, error: 'Unauthorized' });
   next();
 };
 
-// Helper to construct OpenSSH Public Key string
 function getOpenSSHFormat(publicKey, keyName) {
-  const keyType = publicKey.asymmetricKeyType;
-  if (keyType === 'ed25519') {
-    const spkiBuffer = publicKey.export({ type: 'spki', format: 'der' });
-    const rawPublicKey = spkiBuffer.subarray(spkiBuffer.length - 32);
-    const name = Buffer.from("ssh-ed25519");
-    const nameLen = Buffer.alloc(4); nameLen.writeUInt32BE(name.length);
-    const keyLen = Buffer.alloc(4); keyLen.writeUInt32BE(rawPublicKey.length);
-    const combined = Buffer.concat([nameLen, name, keyLen, rawPublicKey]);
-    return `ssh-ed25519 ${combined.toString("base64")} ${keyName}`;
-  }
-  try {
-    return publicKey.export({ type: 'openssh', format: 'string' }).toString().trim();
-  } catch (e) {
-    return publicKey.export({ type: 'spki', format: 'pem' }).toString().trim();
-  }
+  const exported = publicKey.export({ type: 'pkcs1', format: 'der' });
+  const b64 = exported.toString('base64');
+  return `ssh-rsa ${b64} ${keyName}`;
 }
 
-// --- ADVANCED: Manual Ed25519 OpenSSH Private Key Construction ---
 // This builds the "authfile" format used by OpenSSH (-----BEGIN OPENSSH PRIVATE KEY-----)
 function toOpenSSHPrivateKey(pk) {
   const spkiBuffer = createPublicKey(pk).export({ type: 'spki', format: 'der' });
@@ -190,6 +174,7 @@ adminIo.on('connection', (socket) => {
   socket.emit('initial-agent-statuses', statuses);
 });
 
+// --- AGENT NAMESPACE ---
 const agentIo = io.of('/agent');
 agentIo.use((socket, next) => {
   const { token, serverId } = socket.handshake.auth;
@@ -210,33 +195,55 @@ agentIo.on('connection', (socket) => {
     console.log(`Agent disconnected for Server ID: ${serverId}`);
     if (connectedAgents.get(serverId) === socket) {
       connectedAgents.delete(serverId);
-      // Notify admins
       adminIo.emit('agent-status-update', { serverId, status: 'offline' });
     }
   });
 
   socket.on('deploy-log', (data) => {
-    // Broadcast logs to any monitoring admin if needed
-    io.emit(`deploy-log-${serverId}`, data);
+    adminIo.emit(`deploy-log-${serverId}`, data);
+  });
+
+  socket.on('deploy-result', (data) => {
+    const { deploymentId, status, logs } = data;
+    if (deploymentId) {
+      reportDeploymentStatus(deploymentId, status, logs);
+    }
   });
 });
 
 // --- DEPLOYMENT API ---
 app.post('/api/agent/deploy', requireAuth, (req, res) => {
-  const { serverId, deployPath, buildScript, branch } = req.body;
+  const { serverId, deployPath, buildScript, branch, deploymentId } = req.body;
   const agentSocket = connectedAgents.get(serverId.toString());
 
   if (!agentSocket) {
     return res.status(404).json({ success: false, error: 'Agent not connected for this server' });
   }
 
-  agentSocket.emit('deploy-task', { deployPath, buildScript, branch }, (response) => {
+  agentSocket.emit('deploy-task', { deployPath, buildScript, branch, deploymentId }, (response) => {
     if (response?.success) {
       res.json({ success: true, message: 'Deployment task dispatched' });
     } else {
+      if (deploymentId) {
+        reportDeploymentStatus(deploymentId, 'failed', response?.error || 'Failed to dispatch task');
+      }
       res.status(500).json({ success: false, error: response?.error || 'Failed to dispatch task' });
     }
   });
 });
+
+async function reportDeploymentStatus(deploymentId, status, logs) {
+  try {
+    const apiUrl = process.env.API_URL || 'http://localhost:8787';
+    await fetch(`${apiUrl}/api/cicd-deployments/${deploymentId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status, output_log: logs })
+    });
+    console.log(`Reported deployment ${deploymentId} as ${status}`);
+  } catch (err) {
+    console.error(`Failed to report deployment ${deploymentId} status:`, err.message);
+  }
+}
 
 server.listen(PORT, () => console.log(`VPS Helper running on port ${PORT}`));
