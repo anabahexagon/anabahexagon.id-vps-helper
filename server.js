@@ -365,19 +365,30 @@ app.post('/api/agent/deploy', requireAuth, (req, res) => {
 });
 
 async function reportDeploymentStatus(deploymentId, status, logs) {
+  const apiUrl = process.env.API_URL || 'http://localhost:8787';
+  const targetUrl = `${apiUrl.trim()}/api/cicd-deployments/${deploymentId}`;
+  
   try {
-    const apiUrl = process.env.API_URL || 'http://localhost:8787';
-    await fetch(`${apiUrl}/api/cicd-deployments/${deploymentId}`, {
+    console.log(`[REPORT] Menghubungi API: ${targetUrl}`);
+    const response = await fetch(targetUrl, {
       method: 'PUT',
       headers: { 
         'Content-Type': 'application/json',
-        'X-Anaba-Secret-Key': SECRET_KEY
+        'X-Anaba-Secret-Key': SECRET_KEY,
+        'User-Agent': 'Anaba-VPS-Helper'
       },
       body: JSON.stringify({ status, output_log: logs })
     });
-    console.log(`Reported deployment ${deploymentId} as ${status}`);
+
+    if (response.ok) {
+      console.log(`[REPORT] Berhasil memperbarui deployment ${deploymentId} ke status ${status}`);
+    } else {
+      const errorText = await response.text();
+      console.error(`[REPORT] API menolak laporan (Status: ${response.status}): ${errorText}`);
+    }
   } catch (err) {
-    console.error(`Failed to report deployment ${deploymentId} status:`, err.message);
+    console.error(`[REPORT] GAGAL menghubungi API (${targetUrl}):`, err.message);
+    if (err.cause) console.error(`[REPORT] Penyebab Detail:`, err.cause.message || err.cause);
   }
 }
 
