@@ -353,7 +353,10 @@ async function reportDeploymentStatus(deploymentId, status, logs) {
     const apiUrl = process.env.API_URL || 'http://localhost:8787';
     await fetch(`${apiUrl}/api/cicd-deployments/${deploymentId}`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 
+        'Content-Type': 'application/json',
+        'X-Anaba-Secret-Key': SECRET_KEY
+      },
       body: JSON.stringify({ status, output_log: logs })
     });
     console.log(`Reported deployment ${deploymentId} as ${status}`);
