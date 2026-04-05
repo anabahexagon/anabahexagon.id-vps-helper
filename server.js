@@ -259,7 +259,9 @@ agentIo.on('connection', (socket) => {
   });
 
   socket.on('deploy-log', (data) => {
-    adminIo.emit(`deploy-log-${serverId}`, data);
+    // Broadcast menggunakan deploymentId jika ada, fallback ke serverId
+    const targetEvent = data.deploymentId ? `deploy-log-${data.deploymentId}` : `deploy-log-${serverId}`;
+    adminIo.emit(targetEvent, data);
   });
 
   socket.on('agent-metrics', (data) => {
