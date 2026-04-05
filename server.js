@@ -259,9 +259,24 @@ agentIo.on('connection', (socket) => {
   });
 
   socket.on('deploy-log', (data) => {
-    // Broadcast menggunakan deploymentId jika ada, fallback ke serverId
     const targetEvent = data.deploymentId ? `deploy-log-${data.deploymentId}` : `deploy-log-${serverId}`;
     adminIo.emit(targetEvent, data);
+
+    // Akumulasi log ke database lokal secara real-time
+    if (data.deploymentId) {
+      try {
+        const existing = db.prepare("SELECT logs FROM deployment_logs WHERE deployment_id = ?").get(data.deploymentId);
+        if (existing) {
+          db.prepare("UPDATE deployment_logs SET logs = logs || ? WHERE deployment_id = ?")
+            .run(data.data, data.deploymentId);
+        } else {
+          db.prepare("INSERT INTO deployment_logs (deployment_id, server_id, status, logs) VALUES (?, ?, ?, ?)")
+            .run(data.deploymentId, serverId, 'in_progress', data.data);
+        }
+      } catch (err) {
+        console.error("Failed to append real-time log:", err.message);
+      }
+    }
   });
 
   socket.on('agent-metrics', (data) => {
@@ -350,6 +365,16 @@ app.get('/api/agent/:serverId/metrics-history', requireAuth, (req, res) => {
 });
 
 // --- DEPLOYMENT API ---
+app.get('/api/deployment/:id/logs', requireAuth, (req, res) => {
+  const { id } = req.params;
+  try {
+    const row = db.prepare("SELECT logs FROM deployment_logs WHERE deployment_id = ? ORDER BY timestamp DESC LIMIT 1").get(id);
+    res.json({ success: true, logs: row ? row.logs : "" });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 app.post('/api/agent/deploy', requireAuth, (req, res) => {
   const { serverId, deployPath, buildScript, branch, deploymentId, repoUrl } = req.body;
   const agentSocket = connectedAgents.get(serverId.toString());
