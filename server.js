@@ -368,34 +368,66 @@ app.post('/api/agent/deploy', requireAuth, (req, res) => {
   });
 });
 
+const https = require('https');
+
 async function reportDeploymentStatus(deploymentId, status, logs) {
   const apiUrl = process.env.API_URL || 'http://localhost:8787';
-  const targetUrl = `${apiUrl.trim()}/api/cicd-deployments/${deploymentId}`;
   
-  try {
-    console.log(`[REPORT] Menghubungi API: ${targetUrl}`);
-    
-    // Gunakan Agent untuk memaksa IPv4 jika terjadi masalah network
-    const response = await fetch(targetUrl, {
-      method: 'PUT',
-      headers: { 
-        'Content-Type': 'application/json',
-        'X-Anaba-Secret-Key': SECRET_KEY,
-        'User-Agent': 'Anaba-VPS-Helper'
-      },
-      body: JSON.stringify({ status, output_log: logs })
-    });
-
-    if (response.ok) {
-      console.log(`[REPORT] Berhasil memperbarui deployment ${deploymentId} ke status ${status}`);
-    } else {
-      const errorText = await response.text();
-      console.error(`[REPORT] API menolak laporan (Status: ${response.status}): ${errorText}`);
-    }
-  } catch (err) {
-    console.error(`[REPORT] GAGAL menghubungi API (${targetUrl}):`, err.message);
-    if (err.cause) console.error(`[REPORT] Penyebab Detail:`, err.cause.message || err.cause);
+  if (!apiUrl.startsWith('https')) {
+    // Fallback sederhana jika bukan https (misal localhost)
+    try {
+      await fetch(`${apiUrl}/api/cicd-deployments/${deploymentId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Anaba-Secret-Key': SECRET_KEY },
+        body: JSON.stringify({ status, output_log: logs })
+      });
+    } catch (e) { console.error("HTTP Report Failed:", e.message); }
+    return;
   }
+
+  const url = new URL(`${apiUrl.trim()}/api/cicd-deployments/${deploymentId}`);
+  const postData = JSON.stringify({ status, output_log: logs });
+
+  const options = {
+    hostname: url.hostname,
+    port: 443,
+    path: url.pathname,
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(postData),
+      'X-Anaba-Secret-Key': SECRET_KEY,
+      'User-Agent': 'Anaba-VPS-Helper-Native'
+    },
+    timeout: 10000,
+    family: 4 // PAKSA GUNAKAN IPv4
+  };
+
+  console.log(`[REPORT] Menghubungi API (Native HTTPS): ${url.href}`);
+
+  const req = https.request(options, (res) => {
+    let data = '';
+    res.on('data', (chunk) => { data += chunk; });
+    res.on('end', () => {
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        console.log(`[REPORT] Berhasil memperbarui deployment ${deploymentId}`);
+      } else {
+        console.error(`[REPORT] API menolak laporan (Status: ${res.statusCode}): ${data}`);
+      }
+    });
+  });
+
+  req.on('error', (err) => {
+    console.error(`[REPORT] GAGAL menghubungi API:`, err.message);
+  });
+
+  req.on('timeout', () => {
+    req.destroy();
+    console.error(`[REPORT] Koneksi ke API Timeout setelah 10 detik.`);
+  });
+
+  req.write(postData);
+  req.end();
 }
 
 // --- AUTO CLEANUP TASK ---
