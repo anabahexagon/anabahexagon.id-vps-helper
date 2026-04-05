@@ -1,4 +1,8 @@
 require('dotenv').config();
+const dns = require('node:dns');
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder('ipv4first');
+}
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
@@ -370,6 +374,8 @@ async function reportDeploymentStatus(deploymentId, status, logs) {
   
   try {
     console.log(`[REPORT] Menghubungi API: ${targetUrl}`);
+    
+    // Gunakan Agent untuk memaksa IPv4 jika terjadi masalah network
     const response = await fetch(targetUrl, {
       method: 'PUT',
       headers: { 
