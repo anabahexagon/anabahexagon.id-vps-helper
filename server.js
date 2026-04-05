@@ -23,12 +23,11 @@ const dataDir = path.join(__dirname, 'data');
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }
-
 const db = new Database(path.join(dataDir, 'vps_helper.db'));
 db.exec(`
   CREATE TABLE IF NOT EXISTS metrics_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    serverId TEXT NOT NULL,
+    serverId TEXT,
     cpu REAL,
     ram_percent REAL,
     ram_used REAL,
@@ -36,6 +35,14 @@ db.exec(`
     disk_percent REAL,
     disk_used REAL,
     disk_total REAL,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS deployment_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    deployment_id INTEGER,
+    server_id TEXT,
+    status TEXT,
+    logs TEXT,
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
   );
   CREATE INDEX IF NOT EXISTS idx_metrics_serverId_timestamp ON metrics_history(serverId, timestamp);
@@ -282,6 +289,15 @@ agentIo.on('connection', (socket) => {
   socket.on('deploy-result', (data) => {
     const { deploymentId, status, logs } = data;
     if (deploymentId) {
+      // 1. Save to local SQLite backup
+      try {
+        db.prepare("INSERT INTO deployment_logs (deployment_id, server_id, status, logs) VALUES (?, ?, ?, ?)")
+          .run(deploymentId, serverId, status, logs);
+      } catch (err) {
+        console.error("Failed to save deployment log to local DB:", err.message);
+      }
+
+      // 2. Report to Cloudflare API
       reportDeploymentStatus(deploymentId, status, logs);
     }
   });
