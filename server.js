@@ -368,66 +368,40 @@ app.post('/api/agent/deploy', requireAuth, (req, res) => {
   });
 });
 
-const https = require('https');
+const axios = require('axios');
 
 async function reportDeploymentStatus(deploymentId, status, logs) {
   const apiUrl = process.env.API_URL || 'http://localhost:8787';
+  const targetUrl = `${apiUrl.trim()}/api/cicd-deployments/${deploymentId}`;
   
-  if (!apiUrl.startsWith('https')) {
-    // Fallback sederhana jika bukan https (misal localhost)
-    try {
-      await fetch(`${apiUrl}/api/cicd-deployments/${deploymentId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'X-Anaba-Secret-Key': SECRET_KEY },
-        body: JSON.stringify({ status, output_log: logs })
-      });
-    } catch (e) { console.error("HTTP Report Failed:", e.message); }
-    return;
-  }
+  console.log(`[REPORT] Menghubungi API (Axios): ${targetUrl}`);
 
-  const url = new URL(`${apiUrl.trim()}/api/cicd-deployments/${deploymentId}`);
-  const postData = JSON.stringify({ status, output_log: logs });
-
-  const options = {
-    hostname: url.hostname,
-    port: 443,
-    path: url.pathname,
-    method: 'PUT',
-    headers: {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(postData),
-      'X-Anaba-Secret-Key': SECRET_KEY,
-      'User-Agent': 'Anaba-VPS-Helper-Native'
-    },
-    timeout: 10000,
-    family: 4 // PAKSA GUNAKAN IPv4
-  };
-
-  console.log(`[REPORT] Menghubungi API (Native HTTPS): ${url.href}`);
-
-  const req = https.request(options, (res) => {
-    let data = '';
-    res.on('data', (chunk) => { data += chunk; });
-    res.on('end', () => {
-      if (res.statusCode >= 200 && res.statusCode < 300) {
-        console.log(`[REPORT] Berhasil memperbarui deployment ${deploymentId}`);
-      } else {
-        console.error(`[REPORT] API menolak laporan (Status: ${res.statusCode}): ${data}`);
-      }
+  try {
+    const response = await axios.put(targetUrl, {
+      status,
+      output_log: logs
+    }, {
+      headers: {
+        'X-Anaba-Secret-Key': SECRET_KEY,
+        'User-Agent': 'Anaba-VPS-Helper-Axios'
+      },
+      timeout: 15000,
+      // Memaksa penggunaan IPv4 untuk menghindari ETIMEDOUT IPv6
+      family: 4 
     });
-  });
 
-  req.on('error', (err) => {
-    console.error(`[REPORT] GAGAL menghubungi API:`, err.message);
-  });
-
-  req.on('timeout', () => {
-    req.destroy();
-    console.error(`[REPORT] Koneksi ke API Timeout setelah 10 detik.`);
-  });
-
-  req.write(postData);
-  req.end();
+    if (response.status >= 200 && response.status < 300) {
+      console.log(`[REPORT] Berhasil memperbarui deployment ${deploymentId}`);
+    }
+  } catch (err) {
+    console.error(`[REPORT] GAGAL menghubungi API (${targetUrl}):`, err.message);
+    if (err.response) {
+      console.error(`[REPORT] Status API: ${err.response.status}`);
+      console.error(`[REPORT] Respon API:`, err.response.data);
+    } else if (err.request) {
+      console.error(`[REPORT] Tidak ada respon dari API. Pastikan API_URL benar dan bisa dijangkau.`);
+    }
+  }
 }
 
 // --- AUTO CLEANUP TASK ---
